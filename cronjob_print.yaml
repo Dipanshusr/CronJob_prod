@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: monitor-pod
+spec:
+  schedule: "*/1 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: test
+          containers:
+          - name: monitor-pod
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash","-c"]
+            args:
+            - |
+              #!/bin/bash
+                retry_node=3
+                retry_pod=3
+                while [[ $retry_node -gt 0 ]];do
+                    node_count=$(kubectl get nodes --no-headers | wc -l)
+                    ready_node_count=$(kubectl get nodes -o=json | jq '.items | map(select(.status.conditions[] | select(.type == "Ready" and .status == "True"))) | length')
+                    node_diff=$(($node_count - $ready_node_count))
+                    if [[ "${node_count}" == "${ready_node_count}" ]]; then
+                        echo "All nodes are in Ready state. Now Checking pod states..."
+                        break
+                    else
+                        echo "Not all nodes are in Ready state,Sleeping for 1 min and then retrying..."
+                        sleep 60
+                        retry_node=$((retry_node-1))
+                        echo "Retry Value: $retry_node"
+                        
+                    fi
+                done
+                if [[ $retry_node -eq 0 && $node_diff -ge 3 ]]; then
+                    echo "Nodes are still not up even after waiting for 3 mins, Please debug the nodes failure..."
+                else
+                    while [[ $retry_pod -gt 0 ]];do
+                            POD_NAME=$(kubectl get pods -n refract-dev -o custom-columns="POD:metadata.name,STATE:status.containerStatuses[*].state.waiting.reason"| egrep 'CrashLoopBackOff|Init:CrashLoopBackOff' | awk {'print $1'})
+                            if [[ -z "${POD_NAME}" ]]; then
+                                echo "No pods are in CrashLoopBackOff state. Nothing to delete."
+                                break
+                            else
+                                echo "Deleting pods in the CrashLoopBackOff state..."
+                                kubectl delete pod $POD_NAME
+                                sleep 60
+                                retry_pod=$((retry_pod-1))
+                            fi
+                    done
+                    if [[ $retry_pod -eq 0 ]]; then
+                      echo "Some pods are still in CrashLoopBackOff state even after waiting for 3 mins, Please debug the pods failure...."
+                    fi  
+                fi    
+          restartPolicy: OnFailure
